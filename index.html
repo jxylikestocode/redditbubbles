@@ -938,7 +938,7 @@
           corner: 15,
           size: 1,
         })
-          .pos(20, 55, RIGHT)
+          .pos(40, 55, LEFT)
           .addTo();
 
         state.detailView.backBtn.on("click", hideBucketDetail);
@@ -1250,7 +1250,8 @@
           state.bins.painPoints.countLabel.text = `${state.bins.painPoints.labelText} (${state.bins.painPoints.count})`;
         }
         if (state.bins.opportunities) {
-          state.bins.opportunities.count = state.sortedBubbles.opportunities.length;
+          state.bins.opportunities.count =
+            state.sortedBubbles.opportunities.length;
           state.bins.opportunities.countLabel.text = `${state.bins.opportunities.labelText} (${state.bins.opportunities.count})`;
         }
         if (state.bins.noise) {
@@ -1386,7 +1387,8 @@
         if (loadSortedBubbles()) {
           state.bins.painPoints.count = state.sortedBubbles.painPoints.length;
           state.bins.painPoints.countLabel.text = `${state.bins.painPoints.labelText} (${state.bins.painPoints.count})`;
-          state.bins.opportunities.count = state.sortedBubbles.opportunities.length;
+          state.bins.opportunities.count =
+            state.sortedBubbles.opportunities.length;
           state.bins.opportunities.countLabel.text = `${state.bins.opportunities.labelText} (${state.bins.opportunities.count})`;
           state.bins.noise.count = state.sortedBubbles.noise.length;
           state.bins.noise.countLabel.text = `${state.bins.noise.labelText} (${state.bins.noise.count})`;
