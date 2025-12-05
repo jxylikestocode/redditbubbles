@@ -1,0 +1,1427 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Reddit Bubbles - r/SAT Visualizer</title>
+
+    <!-- zimjs.com - JavaScript Canvas Framework -->
+    <script type="module">
+      import zim from "https://zimjs.org/cdn/018/zim";
+
+      // ============================================
+      // CONFIGURATION
+      // ============================================
+      const CONFIG = {
+        FRAME_WIDTH: 1200,
+        FRAME_HEIGHT: 800,
+        ALPHA_MIN: 0.75,
+        ALPHA_MAX: 0.95,
+        DRIFT_SPEED_MIN: 0.1,
+        DRIFT_SPEED_MAX: 0.3,
+        PULSE_SPEED: 0.012,
+        BUBBLE_MIN_RADIUS: 40,
+        BUBBLE_MAX_RADIUS: 90,
+        TOP_BAR_HEIGHT: 0,
+        BIN_HEIGHT: 90,
+        // Underwater color palette - all bubbles are translucent cyan/white
+        FLAIR_COLORS: {
+          Discussion: "#67e8f9", // Cyan
+          Advice: "#5eead4", // Teal
+          "Tips and Tricks": "#7dd3fc", // Light blue
+          "Study Resources": "#a5f3fc", // Pale cyan
+          Official: "#38bdf8", // Sky blue
+          Meme: "#c4b5fd", // Lavender
+          Score: "#93c5fd", // Light blue
+          Question: "#6ee7b7", // Mint
+          Other: "#94a3b8", // Slate
+          default: "#7dd3fc", // Light blue
+        },
+        // Underwater background colors
+        BG_DEEP: "#b0cad7", // Deep ocean floor
+        BG_MID: "#0f2847", // Mid depth
+        BG_SURFACE: "#1e4976", // Near surface
+        BG_PANEL: "rgba(15, 40, 71, 0.85)", // Glass panel
+        BG_PANEL_LIGHT: "rgba(30, 73, 118, 0.7)",
+      };
+
+      // ============================================
+      // STATE MANAGEMENT
+      // ============================================
+      const state = {
+        subreddit: "sat", // default subreddit
+        posts: [],
+        bubbles: [],
+        driftingBubbles: [],
+        sortedBubbles: {
+          painPoints: [],
+          opportunities: [],
+          noise: [],
+        },
+        currentFlairFilter: "All",
+        tickerFunction: null,
+        tooltip: null,
+        bins: {},
+        topBarContainer: null,
+        flairTabs: null,
+        bubbleField: null,
+        titleLabel: null,
+      };
+
+      // LocalStorage helpers for persisting sorted bubbles per subreddit
+      const STORAGE_KEY = "redditBubbles_sortedData";
+
+      function saveSortedBubbles() {
+        try {
+          const allData = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
+          allData[state.subreddit] = state.sortedBubbles;
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(allData));
+        } catch (e) {
+          console.warn("Failed to save to localStorage:", e);
+        }
+      }
+
+      function loadSortedBubbles() {
+        try {
+          const allData = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
+          if (allData[state.subreddit]) {
+            state.sortedBubbles = allData[state.subreddit];
+            return true;
+          }
+        } catch (e) {
+          console.warn("Failed to load from localStorage:", e);
+        }
+        return false;
+      }
+
+      // ============================================
+      // UTILITY FUNCTIONS
+      // ============================================
+      function getRedditApiUrl() {
+        return (
+          "https://corsproxy.io/?" +
+          encodeURIComponent(
+            `https://www.reddit.com/r/${state.subreddit}/rising.json?limit=50`
+          )
+        );
+      }
+
+      function rand(min, max) {
+        return Math.random() * (max - min) + min;
+      }
+
+      function clamp(value, min, max) {
+        return Math.min(Math.max(value, min), max);
+      }
+
+      function truncateText(text, maxLength) {
+        if (text.length <= maxLength) return text;
+        return text.substring(0, maxLength - 3) + "...";
+      }
+
+      function mapCommentsToRadius(numComments, maxComments) {
+        const normalized = maxComments > 0 ? numComments / maxComments : 0;
+        return (
+          CONFIG.BUBBLE_MIN_RADIUS +
+          normalized * (CONFIG.BUBBLE_MAX_RADIUS - CONFIG.BUBBLE_MIN_RADIUS)
+        );
+      }
+
+      function mapUpvoteToAlpha(upvoteRatio) {
+        const normalized = clamp((upvoteRatio - 0.5) / 0.5, 0, 1);
+        return (
+          CONFIG.ALPHA_MIN + normalized * (CONFIG.ALPHA_MAX - CONFIG.ALPHA_MIN)
+        );
+      }
+
+      function mapHeatToPulse(heat, maxHeat) {
+        const normalized = maxHeat > 0 ? heat / maxHeat : 0;
+        return 0.02 + normalized * 0.08;
+      }
+
+      function getFlairColor(flair) {
+        if (!flair) return CONFIG.FLAIR_COLORS["default"];
+        return CONFIG.FLAIR_COLORS[flair] || CONFIG.FLAIR_COLORS["default"];
+      }
+
+      function initDriftVector() {
+        const speed = rand(CONFIG.DRIFT_SPEED_MIN, CONFIG.DRIFT_SPEED_MAX);
+        const angle = rand(0, Math.PI * 2);
+        return {
+          dx: Math.cos(angle) * speed,
+          dy: Math.sin(angle) * speed,
+        };
+      }
+
+      // ============================================
+      // DATA FUNCTIONS
+      // ============================================
+      async function fetchRedditPosts() {
+        try {
+          const response = await fetch(getRedditApiUrl());
+
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+          }
+
+          const json = await response.json();
+
+          if (!json.data || !json.data.children) {
+            throw new Error("Invalid response structure from Reddit API");
+          }
+
+          return parsePostData(json);
+        } catch (error) {
+          console.error("Failed to fetch Reddit posts:", error);
+          throw error;
+        }
+      }
+
+      function parsePostData(json) {
+        const now = Date.now() / 1000;
+
+        return json.data.children
+          .filter((child) => child.kind === "t3" && child.data)
+          .map((child) => {
+            const post = child.data;
+            const age = Math.max(now - (post.created_utc || now), 1);
+            const score = post.score || 0;
+            const upvoteRatio = post.upvote_ratio || 0.5;
+            const heat = (score * upvoteRatio) / age;
+
+            return {
+              id: post.id || `unknown-${Math.random()}`,
+              title: post.title || "Untitled",
+              score: score,
+              numComments: post.num_comments || 0,
+              upvoteRatio: upvoteRatio,
+              flair: post.link_flair_text || null,
+              permalink: post.permalink || "",
+              createdUtc: post.created_utc || now,
+              author: post.author || "unknown",
+              age: age,
+              heat: heat,
+            };
+          });
+      }
+
+      // ============================================
+      // ERROR HANDLING
+      // ============================================
+      function showErrorPane(message) {
+        const errorContent = new Container(320, 160);
+
+        new Label({
+          text: "Error Loading Posts",
+          size: 20,
+          color: "#f8fafc",
+          bold: true,
+          font: "Arial",
+        }).pos(0, 25, CENTER, TOP, errorContent);
+
+        new Label({
+          text: message,
+          size: 13,
+          color: "#fca5a5",
+          font: "Arial",
+        }).pos(0, 60, CENTER, TOP, errorContent);
+
+        const retryBtn = new Button({
+          label: "Retry",
+          width: 100,
+          height: 38,
+          backgroundColor: "#ef4444",
+          rollBackgroundColor: "#f87171",
+          color: white,
+          corner: 19,
+        }).pos(0, 105, CENTER, TOP, errorContent);
+
+        const errorPane = new Pane({
+          content: errorContent,
+          backgroundColor: CONFIG.BG_SECONDARY,
+          corner: 16,
+          close: true,
+          closeColor: "#94a3b8",
+        }).show();
+
+        retryBtn.on("click", () => {
+          errorPane.hide();
+          handleReload();
+        });
+      }
+
+      // ============================================
+      // TOOLTIP
+      // ============================================
+      function buildTooltip() {
+        const tooltipWidth = 260;
+        const tooltipHeight = 160;
+        const content = new Container(tooltipWidth, tooltipHeight);
+
+        content.titleLabel = new Label({
+          text: "",
+          size: 12,
+          color: "#e0f2fe",
+          align: LEFT,
+          bold: true,
+          font: "Arial",
+          lineWidth: tooltipWidth - 24,
+          lineHeight: 16,
+        }).pos(12, 10, LEFT, TOP, content);
+
+        content.scoreLabel = new Label({
+          text: "",
+          size: 10,
+          color: "#7dd3fc",
+          font: "Arial",
+        }).pos(12, 75, LEFT, TOP, content);
+
+        content.commentsLabel = new Label({
+          text: "",
+          size: 10,
+          color: "#7dd3fc",
+          font: "Arial",
+        }).pos(12, 95, LEFT, TOP, content);
+
+        content.flairLabel = new Label({
+          text: "",
+          size: 10,
+          color: "#7dd3fc",
+          font: "Arial",
+        }).pos(12, 115, LEFT, TOP, content);
+
+        content.heatLabel = new Label({
+          text: "",
+          size: 10,
+          color: "#fcd34d",
+          font: "Arial",
+        }).pos(12, 135, LEFT, TOP, content);
+
+        state.tooltip = new Container(tooltipWidth, tooltipHeight);
+
+        // Underwater glass effect
+        new Rectangle(tooltipWidth, tooltipHeight, "#0a1628", null, null, 14)
+          .addTo(state.tooltip)
+          .alp(0.9);
+
+        // Border glow
+        new Rectangle(tooltipWidth, tooltipHeight, null, "#38bdf8", 1, 14)
+          .addTo(state.tooltip)
+          .alp(0.4);
+
+        content.addTo(state.tooltip);
+        state.tooltip.alpha = 0;
+        state.tooltip.addTo();
+      }
+
+      function showTooltip(bubble, e) {
+        const post = bubble.postData;
+        const content = state.tooltip.getChildAt(2);
+
+        content.titleLabel.text = post.title; // Show full title in tooltip
+        content.scoreLabel.text = `⬆ Score: ${post.score}`;
+        content.commentsLabel.text = `💬 Comments: ${post.numComments}`;
+        content.flairLabel.text = `🏷 Flair: ${post.flair || "None"}`;
+        content.heatLabel.text = `🔥 Heat: ${post.heat.toFixed(4)}`;
+
+        const tooltipWidth = 260;
+        const tooltipHeight = 160;
+
+        let tooltipX = bubble.x + bubble.radius + 12;
+        let tooltipY = bubble.y - 80;
+
+        if (tooltipX + tooltipWidth > W) {
+          tooltipX = bubble.x - bubble.radius - tooltipWidth - 15;
+        }
+        if (tooltipY < CONFIG.TOP_BAR_HEIGHT) {
+          tooltipY = CONFIG.TOP_BAR_HEIGHT + 10;
+        }
+        if (tooltipY + tooltipHeight > H - CONFIG.BIN_HEIGHT) {
+          tooltipY = H - CONFIG.BIN_HEIGHT - tooltipHeight - 10;
+        }
+
+        state.tooltip.pos(tooltipX, tooltipY);
+        state.tooltip.top(); // Always keep tooltip on top
+        state.tooltip.alpha = 1;
+        S.update();
+      }
+
+      function hideTooltip() {
+        if (state.tooltip) {
+          state.tooltip.alpha = 0;
+          S.update();
+        }
+      }
+
+      // ============================================
+      // UI BUILDERS
+      // ============================================
+      function buildTopBar() {
+        state.topBarContainer = new Container(W, CONFIG.TOP_BAR_HEIGHT).addTo();
+
+        // Glass panel effect - semi-transparent
+        new Rectangle(W, CONFIG.TOP_BAR_HEIGHT, "#0f2847")
+          .addTo(state.topBarContainer)
+          .alp(0.9);
+
+        // Surface water shimmer line
+        new Rectangle(W, 3, "#7dd3fc")
+          .pos(0, CONFIG.TOP_BAR_HEIGHT - 3, LEFT, TOP, state.topBarContainer)
+          .alp(0.4);
+
+        new Label({
+          text: "Reddit Bubbles",
+          size: 26,
+          color: "#e0f2fe",
+          bold: true,
+          font: "Arial",
+        }).pos(25, 10, LEFT, TOP, state.topBarContainer);
+
+        new Label({
+          text: "r/SAT · Rising posts float up",
+          size: 12,
+          color: "#7dd3fc",
+          font: "Arial",
+        }).pos(25, 40, LEFT, TOP, state.topBarContainer);
+
+        const reloadBtn = new Button({
+          label: "↻ Refresh",
+          width: 95,
+          height: 34,
+          backgroundColor: "#0ea5e9",
+          rollBackgroundColor: "#38bdf8",
+          color: white,
+          corner: 17,
+        }).pos(20, 15, RIGHT, TOP, state.topBarContainer);
+
+        reloadBtn.on("click", handleReload);
+      }
+
+      function buildFlairTabs() {
+        const uniqueFlairs = [
+          "All",
+          ...new Set(state.posts.map((p) => p.flair).filter((f) => f !== null)),
+        ].slice(0, 5);
+
+        if (state.flairTabs) {
+          state.flairTabs.removeFrom();
+        }
+
+        state.flairTabs = new Tabs({
+          width: 380,
+          height: 30,
+          tabs: uniqueFlairs,
+          backgroundColor: "#164e63",
+          rollBackgroundColor: "#0e7490",
+          selectedBackgroundColor: "#0ea5e9",
+          color: "#e0f2fe",
+          corner: 15,
+          spacing: 3,
+          labelSize: 11,
+        }).pos(250, 18, LEFT, TOP, state.topBarContainer);
+
+        state.flairTabs.on("change", () => {
+          filterByFlair(state.flairTabs.text);
+        });
+      }
+
+      function buildSortingBins() {
+        const binWidth = 150;
+        const binHeight = 50;
+        const binSpacing = 10;
+        const binX = W - binWidth - 20;
+
+        // Store binContainer position BEFORE creating bins
+        state.binContainerX = binX;
+        state.binContainerY = 20;
+
+        const binContainer = new Container(
+          binWidth,
+          (binHeight + binSpacing) * 3
+        )
+          .pos(binX, 20)
+          .addTo();
+
+        state.bins.painPoints = createBin(
+          0,
+          0,
+          binWidth,
+          binHeight,
+          "#f87171",
+          "🔥 Pain Points",
+          binContainer,
+          "painPoints"
+        );
+
+        state.bins.opportunities = createBin(
+          0,
+          binHeight + binSpacing,
+          binWidth,
+          binHeight,
+          "#4ade80",
+          "💡 Opportunities",
+          binContainer,
+          "opportunities"
+        );
+
+        state.bins.noise = createBin(
+          0,
+          (binHeight + binSpacing) * 2,
+          binWidth,
+          binHeight,
+          "#94a3b8",
+          "🌊 Noise",
+          binContainer,
+          "noise"
+        );
+      }
+
+      function createBin(
+        x,
+        y,
+        width,
+        height,
+        color,
+        labelText,
+        container,
+        category
+      ) {
+        const binContainer = new Container(width, height).pos(
+          x,
+          y,
+          LEFT,
+          TOP,
+          container
+        );
+
+        // Glass container effect
+        const rect = new Rectangle(width, height, color, null, null, 16)
+          .center(binContainer)
+          .alp(0.2);
+
+        // Glowing border
+        new Rectangle(width, height, null, color, 2, 16)
+          .center(binContainer)
+          .alp(0.5);
+
+        // Inner highlight
+        new Rectangle(width - 6, height - 6, "#ffffff", null, null, 13)
+          .center(binContainer)
+          .alp(0.05);
+
+        // Label with counter - centered
+        const countLabel = new Label({
+          text: `${labelText} (0)`,
+          size: 12,
+          color: "#e0f2fe",
+          bold: true,
+          font: "Arial",
+          align: CENTER,
+        }).center(binContainer);
+
+        binContainer.items = [];
+        binContainer.labelText = labelText;
+        binContainer.rect = rect;
+        binContainer.globalX = (state.binContainerX || 0) + x;
+        binContainer.globalY = (state.binContainerY || 0) + y;
+        binContainer.binWidth = width;
+        binContainer.binHeight = height;
+        binContainer.color = color;
+        binContainer.count = 0;
+        binContainer.countLabel = countLabel;
+        binContainer.category = category;
+
+        // Click handler to show bucket detail
+        binContainer.on("click", () => {
+          if (binContainer.count > 0) {
+            showBucketDetail(binContainer, category, color);
+          }
+        });
+
+        // Hover effect to indicate clickable
+        binContainer.cursor = "pointer";
+        binContainer.on("mouseover", () => {
+          binContainer.sca(1.1);
+          S.update();
+        });
+        binContainer.on("mouseout", () => {
+          if (!binContainer.isHighlighted) {
+            binContainer.sca(1);
+            S.update();
+          }
+        });
+
+        return binContainer;
+      }
+
+      // ============================================
+      // BUBBLE CREATION
+      // ============================================
+      function buildBubbles() {
+        const maxComments = Math.max(
+          ...state.posts.map((p) => p.numComments),
+          1
+        );
+        const maxHeat = Math.max(...state.posts.map((p) => p.heat), 0.001);
+
+        // Bubbles use full height (bins are on the right side)
+        const fieldTop = 100;
+        const fieldBottom = H - 20;
+
+        // Get IDs of already sorted posts
+        const sortedIds = new Set([
+          ...state.sortedBubbles.painPoints.map((p) => p.id),
+          ...state.sortedBubbles.opportunities.map((p) => p.id),
+          ...state.sortedBubbles.noise.map((p) => p.id),
+        ]);
+
+        state.posts.forEach((post) => {
+          // Skip posts that have already been sorted
+          if (sortedIds.has(post.id)) return;
+
+          const bubble = createBubble(
+            post,
+            maxComments,
+            maxHeat,
+            fieldTop,
+            fieldBottom
+          );
+          state.bubbles.push(bubble);
+          state.driftingBubbles.push(bubble);
+        });
+      }
+
+      function createBubble(post, maxComments, maxHeat, fieldTop, fieldBottom) {
+        const color = getFlairColor(post.flair);
+        const pulseStrength = mapHeatToPulse(post.heat, maxHeat);
+
+        // Calculate bubble size based on comment count FIRST
+        const bubbleRadius = mapCommentsToRadius(post.numComments, maxComments);
+        const bubbleSize = bubbleRadius * 2;
+
+        // Scale font size proportionally to bubble size (8px for smallest, 12px for largest)
+        const fontScale =
+          (bubbleRadius - CONFIG.BUBBLE_MIN_RADIUS) /
+          (CONFIG.BUBBLE_MAX_RADIUS - CONFIG.BUBBLE_MIN_RADIUS);
+        const fontSize = 8 + fontScale * 4;
+        const lineWidth = bubbleRadius * 1.4;
+
+        // Truncate title to fit in bubble (roughly 4-6 chars per line, 2-4 lines based on size)
+        const maxLines = Math.floor(bubbleRadius / (fontSize * 0.8));
+        const charsPerLine = Math.floor(lineWidth / (fontSize * 0.6));
+        const maxChars = maxLines * charsPerLine;
+        const truncatedTitle = truncateText(post.title, maxChars);
+
+        // Create label with truncated title, word-wrapped
+        const label = new Label({
+          text: truncatedTitle,
+          size: fontSize,
+          color: "#1e3a5f",
+          align: CENTER,
+          valign: CENTER,
+          lineWidth: lineWidth,
+          lineHeight: fontSize * 1.4,
+          font: "Arial",
+          bold: true,
+        });
+
+        // Create container
+        const bubble = new Container(bubbleSize, bubbleSize).addTo();
+        bubble.mouseChildren = false; // Prevent children from being dragged separately
+
+        // Outer glow
+        new Circle(bubbleRadius + 6, color)
+          .center(bubble)
+          .alp(0.3)
+          .addTo(bubble);
+
+        // Main bubble body - white/light base
+        new Circle(bubbleRadius, "#ffffff")
+          .center(bubble)
+          .alp(0.85)
+          .addTo(bubble);
+
+        // Color tint overlay
+        new Circle(bubbleRadius - 2, color)
+          .center(bubble)
+          .alp(0.25)
+          .addTo(bubble);
+
+        // Highlight reflection (top-left) - light refraction
+        new Circle(bubbleRadius * 0.4, "#ffffff")
+          .center(bubble)
+          .mov(-bubbleRadius * 0.25, -bubbleRadius * 0.25)
+          .alp(0.6)
+          .addTo(bubble);
+
+        // Secondary smaller highlight
+        new Circle(bubbleRadius * 0.15, "#ffffff")
+          .center(bubble)
+          .mov(-bubbleRadius * 0.1, -bubbleRadius * 0.4)
+          .alp(0.8)
+          .addTo(bubble);
+
+        // Subtle rim/edge
+        new Circle(bubbleRadius, null, "#ffffff", 2)
+          .center(bubble)
+          .alp(0.3)
+          .addTo(bubble);
+        // Add label on top
+        label.center(bubble);
+
+        // Use bubble radius for positioning
+        const effectiveRadius = bubbleRadius;
+
+        bubble.x = rand(effectiveRadius + 20, W - effectiveRadius - 20);
+
+        // Y position based on heat: hotter posts rise to top, colder sink to bottom
+        const heatNormalized = maxHeat > 0 ? post.heat / maxHeat : 0;
+
+        // Alpha based on heat: hot bubbles (top) are brighter, cold bubbles (bottom) are dimmer
+        const alpha =
+          CONFIG.ALPHA_MIN +
+          heatNormalized * (CONFIG.ALPHA_MAX - CONFIG.ALPHA_MIN);
+        bubble.alp(alpha);
+        const fieldHeight = fieldBottom - fieldTop - effectiveRadius * 2;
+        const baseY =
+          fieldBottom - effectiveRadius - heatNormalized * fieldHeight;
+        // Add slight randomness (±30px) to prevent exact stacking
+        bubble.y = clamp(
+          baseY + rand(-30, 30),
+          fieldTop + effectiveRadius,
+          fieldBottom - effectiveRadius
+        );
+
+        bubble.postData = post;
+        bubble.originalRadius = effectiveRadius;
+        bubble.originalAlpha = alpha;
+        bubble.driftVector = initDriftVector();
+        bubble.pulsePhase = rand(0, Math.PI * 2);
+        bubble.pulseStrength = pulseStrength;
+        bubble.isDragging = false;
+        bubble.isSorted = false;
+        bubble.radius = effectiveRadius; // Store for boundary calculations
+        bubble.cursor = "pointer";
+
+        bubble.drag({
+          onTop: true,
+        });
+
+        setupBubbleEvents(bubble, fieldTop, fieldBottom);
+
+        return bubble;
+      }
+
+      function setupBubbleEvents(bubble, fieldTop, fieldBottom) {
+        bubble.on("mouseover", (e) => {
+          bubble.top(); // Bring bubble to front on hover
+          if (!bubble.isDragging) {
+            showTooltip(bubble, e);
+          }
+        });
+
+        bubble.on("mouseout", () => {
+          hideTooltip();
+        });
+
+        bubble.on("pressdown", () => {
+          bubble.startX = bubble.x;
+          bubble.startY = bubble.y;
+          bubble.isDragging = false;
+          hideTooltip();
+        });
+
+        bubble.on("pressmove", () => {
+          // Only mark as dragging if moved more than 5px
+          const dx = bubble.x - bubble.startX;
+          const dy = bubble.y - bubble.startY;
+          if (Math.sqrt(dx * dx + dy * dy) > 5) {
+            bubble.isDragging = true;
+          }
+
+          // Highlight bin when dragging over it
+          if (bubble.isDragging) {
+            highlightBinUnderBubble(bubble);
+          }
+        });
+
+        bubble.on("pressup", () => {
+          // Reset all bin highlights
+          resetBinHighlights();
+
+          if (!bubble.isDragging && bubble.postData.permalink) {
+            // It was a click, not a drag - open the Reddit post
+            const url = "https://www.reddit.com" + bubble.postData.permalink;
+            window.open(url, "_blank");
+          } else if (!bubble.isSorted) {
+            // It was a drag - check for bin drop
+            checkBinDrop(bubble, fieldTop, fieldBottom);
+          }
+          bubble.isDragging = false;
+        });
+      }
+
+      // ============================================
+      // BIN DROP DETECTION
+      // ============================================
+      function highlightBinUnderBubble(bubble) {
+        // Use bubble center (x and y are top-left, add radius for center)
+        const bubbleCenterX = bubble.x + bubble.radius;
+        const bubbleCenterY = bubble.y + bubble.radius;
+
+        for (const [key, bin] of Object.entries(state.bins)) {
+          const binLeft = bin.globalX;
+          const binRight = bin.globalX + bin.binWidth;
+          const binTop = bin.globalY;
+          const binBottom = bin.globalY + bin.binHeight;
+
+          const isOver =
+            bubbleCenterX >= binLeft &&
+            bubbleCenterX <= binRight &&
+            bubbleCenterY >= binTop &&
+            bubbleCenterY <= binBottom;
+
+          if (isOver && !bin.isHighlighted) {
+            bin.isHighlighted = true;
+            bin.sca(1.1);
+            bin.rect.alp(0.5);
+          } else if (!isOver && bin.isHighlighted) {
+            bin.isHighlighted = false;
+            bin.sca(1);
+            bin.rect.alp(0.2);
+          }
+        }
+      }
+
+      function resetBinHighlights() {
+        for (const [key, bin] of Object.entries(state.bins)) {
+          bin.isHighlighted = false;
+          bin.sca(1);
+          bin.rect.alp(0.2);
+        }
+      }
+
+      function checkBinDrop(bubble, fieldTop, fieldBottom) {
+        // Use bubble center (x and y are top-left, add radius for center)
+        const bubbleCenterX = bubble.x + bubble.radius;
+        const bubbleCenterY = bubble.y + bubble.radius;
+
+        for (const [key, bin] of Object.entries(state.bins)) {
+          const binLeft = bin.globalX;
+          const binRight = bin.globalX + bin.binWidth;
+          const binTop = bin.globalY;
+          const binBottom = bin.globalY + bin.binHeight;
+
+          if (
+            bubbleCenterX >= binLeft &&
+            bubbleCenterX <= binRight &&
+            bubbleCenterY >= binTop &&
+            bubbleCenterY <= binBottom
+          ) {
+            snapToBin(bubble, bin, key);
+            return;
+          }
+        }
+
+        keepInBounds(bubble, fieldTop, fieldBottom);
+      }
+
+      function snapToBin(bubble, bin, category) {
+        removeFromDrift(bubble);
+        bubble.isSorted = true;
+
+        // Store the post data before removing the bubble
+        state.sortedBubbles[category].push(bubble.postData);
+
+        // Save to localStorage
+        saveSortedBubbles();
+
+        // Remove bubble from stage
+        bubble.removeFrom();
+
+        // Remove from bubbles array
+        const bubbleIndex = state.bubbles.indexOf(bubble);
+        if (bubbleIndex > -1) {
+          state.bubbles.splice(bubbleIndex, 1);
+        }
+
+        // Increment counter and update label
+        bin.count++;
+        bin.countLabel.text = `${bin.labelText} (${bin.count})`;
+
+        // Flash the bin
+        bin.rect.animate({ alpha: 0.6 }, 0.15, "linear", null, () => {
+          bin.rect.animate({ alpha: 0.2 }, 0.15);
+        });
+
+        S.update();
+
+        console.log(`Post sorted as: ${category} (total: ${bin.count})`);
+      }
+
+      // ============================================
+      // BUCKET DETAIL VIEW
+      // ============================================
+      function showBucketDetail(bin, category, color) {
+        // Store current view state
+        state.detailView = {
+          active: true,
+          category: category,
+          color: color,
+          detailBubbles: [],
+        };
+
+        // Hide all drifting bubbles
+        state.bubbles.forEach((bubble) => {
+          bubble.vis(false);
+        });
+
+        // Hide main UI elements
+        state.titleLabel.vis(false);
+        state.subredditLabel.vis(false);
+        state.subredditInput.vis(false);
+        state.goBtn.vis(false);
+
+        // Hide all bins
+        for (const bin of Object.values(state.bins)) {
+          bin.vis(false);
+        }
+
+        // Stop drift animation temporarily
+        if (state.tickerFunction) {
+          Ticker.remove(state.tickerFunction);
+        }
+
+        // Create title for detail view (centered at top, styled like bucket)
+        const titleText = `${bin.labelText} (${state.sortedBubbles[category].length})`;
+        const titleLabel = new Label({
+          text: titleText,
+          size: 24,
+          color: "#e0f2fe",
+          bold: true,
+          font: "Arial",
+        });
+        const titlePadding = 20;
+        const titleWidth = titleLabel.width + titlePadding * 2;
+        const titleHeight = titleLabel.height + titlePadding;
+
+        state.detailView.title = new Container(titleWidth, titleHeight)
+          .pos(0, 55, CENTER)
+          .addTo();
+
+        // Transparent background like bucket
+        new Rectangle(titleWidth, titleHeight, color, null, null, 16)
+          .center(state.detailView.title)
+          .alp(0.2);
+
+        titleLabel.center(state.detailView.title);
+        state.detailView.titleLabel = titleLabel;
+
+        // Create back button (top right, same line as title)
+        state.detailView.backBtn = new Button({
+          label: new Label({
+            text: "← Back",
+            size: 20,
+            bold: true,
+          }),
+          width: 80,
+          height: 35,
+          backgroundColor: "#0ea5e9",
+          rollBackgroundColor: "#38bdf8",
+          color: white,
+          corner: 15,
+          size: 1,
+        })
+          .pos(20, 55, RIGHT)
+          .addTo();
+
+        state.detailView.backBtn.on("click", hideBucketDetail);
+
+        // Create bubbles for sorted posts
+        const posts = state.sortedBubbles[category];
+        const fieldTop = 50;
+        const fieldBottom = H - 20;
+
+        posts.forEach((post, index) => {
+          const bubble = createDetailBubble(
+            post,
+            color,
+            fieldTop,
+            fieldBottom,
+            index,
+            posts.length,
+            category
+          );
+          state.detailView.detailBubbles.push(bubble);
+        });
+
+        S.update();
+      }
+
+      function createDetailBubble(
+        post,
+        color,
+        fieldTop,
+        fieldBottom,
+        index,
+        total,
+        category
+      ) {
+        const bubbleRadius = 60;
+        const bubbleSize = bubbleRadius * 2;
+
+        // Font size
+        const fontSize = 10;
+        const lineWidth = bubbleRadius * 1.4;
+        const maxChars = 50;
+        const truncatedTitle = truncateText(post.title, maxChars);
+
+        const label = new Label({
+          text: truncatedTitle,
+          size: fontSize,
+          color: "#1e3a5f",
+          align: CENTER,
+          valign: CENTER,
+          lineWidth: lineWidth,
+          lineHeight: fontSize * 1.4,
+          font: "Arial",
+          bold: true,
+        });
+
+        const bubble = new Container(bubbleSize, bubbleSize).addTo();
+
+        // Outer glow with bucket color
+        new Circle(bubbleRadius + 6, color).center(bubble).alp(0.4);
+
+        // Main bubble body
+        new Circle(bubbleRadius, "#ffffff").center(bubble).alp(0.9);
+
+        // Color tint overlay with bucket color
+        new Circle(bubbleRadius - 2, color).center(bubble).alp(0.3);
+
+        // Highlight
+        new Circle(bubbleRadius * 0.4, "#ffffff")
+          .center(bubble)
+          .mov(-bubbleRadius * 0.25, -bubbleRadius * 0.25)
+          .alp(0.6);
+
+        // Rim
+        new Circle(bubbleRadius, null, color, 2).center(bubble).alp(0.5);
+
+        label.center(bubble);
+
+        // X button for removing from bucket (hidden by default)
+        const xBtnSize = 24;
+        const xBtn = new Container(xBtnSize, xBtnSize);
+        new Circle(xBtnSize / 2, "#ef4444").center(xBtn);
+        new Label({
+          text: "×",
+          size: 16,
+          color: white,
+          bold: true,
+          font: "Arial",
+        }).center(xBtn);
+        xBtn.pos(bubbleSize - xBtnSize - 5, 5, LEFT, TOP, bubble);
+        xBtn.vis(false);
+        xBtn.cursor = "pointer";
+        bubble.xBtn = xBtn;
+
+        // Store radius for tooltip positioning
+        bubble.radius = bubbleRadius;
+        bubble.cursor = "pointer";
+
+        // Hover to show X button and tooltip
+        bubble.on("mouseover", (e) => {
+          xBtn.vis(true);
+          bubble.top();
+          showTooltip(bubble, e);
+        });
+        bubble.on("mouseout", () => {
+          xBtn.vis(false);
+          hideTooltip();
+        });
+
+        // X button click to remove from bucket
+        xBtn.on("click", (e) => {
+          e.stopImmediatePropagation();
+          removeFromBucket(bubble, post, category);
+        });
+
+        // Position bubbles in a grid
+        const cols = Math.ceil(Math.sqrt(total));
+        const row = Math.floor(index / cols);
+        const col = index % cols;
+        const spacingX = (W - 200) / (cols + 1);
+        const spacingY =
+          (fieldBottom - fieldTop) / (Math.ceil(total / cols) + 1);
+
+        bubble.x = 100 + spacingX * (col + 1);
+        bubble.y = fieldTop + spacingY * (row + 1);
+
+        bubble.postData = post;
+
+        // Click bubble to open Reddit post
+        bubble.on("click", () => {
+          if (post.permalink) {
+            window.open("https://www.reddit.com" + post.permalink, "_blank");
+          }
+        });
+
+        return bubble;
+      }
+
+      function removeFromBucket(bubble, postData, category) {
+        // Remove post from sortedBubbles array
+        const index = state.sortedBubbles[category].findIndex(
+          (p) => p.id === postData.id
+        );
+        if (index > -1) {
+          state.sortedBubbles[category].splice(index, 1);
+        }
+
+        // Save to localStorage
+        saveSortedBubbles();
+
+        // Update bin counter
+        const bin = state.bins[category];
+        bin.count--;
+        bin.countLabel.text = `${bin.labelText} (${bin.count})`;
+
+        // Update detail view title
+        if (state.detailView.titleLabel) {
+          state.detailView.titleLabel.text = `${bin.labelText} (${state.sortedBubbles[category].length})`;
+        }
+
+        // Remove bubble from detail view
+        bubble.removeFrom();
+        const bubbleIndex = state.detailView.detailBubbles.indexOf(bubble);
+        if (bubbleIndex > -1) {
+          state.detailView.detailBubbles.splice(bubbleIndex, 1);
+        }
+
+        S.update();
+      }
+
+      function hideBucketDetail() {
+        if (!state.detailView || !state.detailView.active) return;
+
+        // Remove detail bubbles
+        state.detailView.detailBubbles.forEach((bubble) => {
+          bubble.removeFrom();
+        });
+
+        // Remove back button and title
+        if (state.detailView.backBtn) {
+          state.detailView.backBtn.removeFrom();
+        }
+        if (state.detailView.title) {
+          state.detailView.title.removeFrom();
+        }
+
+        // Show all drifting bubbles again
+        state.bubbles.forEach((bubble) => {
+          bubble.vis(true);
+        });
+
+        // Show main UI elements again
+        state.titleLabel.vis(true);
+        state.subredditLabel.vis(true);
+        state.subredditInput.vis(true);
+        state.goBtn.vis(true);
+
+        // Show all bins again
+        for (const bin of Object.values(state.bins)) {
+          bin.vis(true);
+        }
+
+        // Restart drift animation
+        initDriftAnimation();
+
+        state.detailView.active = false;
+        S.update();
+      }
+
+      function keepInBounds(bubble, fieldTop, fieldBottom) {
+        const r = bubble.radius * bubble.scaleX;
+        bubble.x = clamp(bubble.x, r + 20, W - r - 20);
+        bubble.y = clamp(bubble.y, fieldTop + r, fieldBottom - r);
+      }
+
+      // ============================================
+      // ANIMATION
+      // ============================================
+      function initDriftAnimation() {
+        const fieldTop = CONFIG.TOP_BAR_HEIGHT + 20;
+        const fieldBottom = H - CONFIG.BIN_HEIGHT - 20;
+
+        state.tickerFunction = Ticker.add(() => {
+          state.driftingBubbles.forEach((bubble) => {
+            if (bubble.isDragging || bubble.isSorted) return;
+
+            // Horizontal drift only - Y is fixed based on heat
+            bubble.x += bubble.driftVector.dx;
+
+            const r = bubble.originalRadius;
+            const minX = r + 20;
+            const maxX = W - r - 20;
+
+            // Bounce off left/right edges
+            if (bubble.x <= minX || bubble.x >= maxX) {
+              bubble.driftVector.dx *= -1;
+              bubble.x = clamp(bubble.x, minX, maxX);
+            }
+
+            // Pulse animation based on heat
+            bubble.pulsePhase += CONFIG.PULSE_SPEED;
+            const pulseFactor =
+              1 + Math.sin(bubble.pulsePhase) * bubble.pulseStrength;
+            bubble.sca(pulseFactor);
+          });
+        });
+      }
+
+      function removeFromDrift(bubble) {
+        const index = state.driftingBubbles.indexOf(bubble);
+        if (index > -1) {
+          state.driftingBubbles.splice(index, 1);
+        }
+      }
+
+      // ============================================
+      // FLAIR FILTER
+      // ============================================
+      function filterByFlair(flair) {
+        state.currentFlairFilter = flair;
+
+        state.bubbles.forEach((bubble) => {
+          if (bubble.isSorted) return;
+
+          const matchesFlair =
+            flair === "All" || bubble.postData.flair === flair;
+
+          bubble.vis(matchesFlair);
+
+          if (matchesFlair && !state.driftingBubbles.includes(bubble)) {
+            state.driftingBubbles.push(bubble);
+          } else if (!matchesFlair) {
+            removeFromDrift(bubble);
+          }
+        });
+
+        S.update();
+      }
+
+      // ============================================
+      // RELOAD
+      // ============================================
+      async function handleReload() {
+        if (state.tickerFunction) {
+          Ticker.remove(state.tickerFunction);
+          state.tickerFunction = null;
+        }
+
+        state.bubbles.forEach((bubble) => bubble.removeFrom());
+
+        state.posts = [];
+        state.bubbles = [];
+        state.driftingBubbles = [];
+
+        // Load saved data for this subreddit or start fresh
+        if (!loadSortedBubbles()) {
+          state.sortedBubbles = {
+            painPoints: [],
+            opportunities: [],
+            noise: [],
+          };
+        }
+
+        // Update bin counters from loaded data
+        for (const bin of Object.values(state.bins)) {
+          bin.items = [];
+        }
+        if (state.bins.painPoints) {
+          state.bins.painPoints.count = state.sortedBubbles.painPoints.length;
+          state.bins.painPoints.countLabel.text = `${state.bins.painPoints.labelText} (${state.bins.painPoints.count})`;
+        }
+        if (state.bins.opportunities) {
+          state.bins.opportunities.count = state.sortedBubbles.opportunities.length;
+          state.bins.opportunities.countLabel.text = `${state.bins.opportunities.labelText} (${state.bins.opportunities.count})`;
+        }
+        if (state.bins.noise) {
+          state.bins.noise.count = state.sortedBubbles.noise.length;
+          state.bins.noise.countLabel.text = `${state.bins.noise.labelText} (${state.bins.noise.count})`;
+        }
+
+        const loader = new Label({
+          text: "Reloading...",
+          size: 24,
+          color: white,
+        })
+          .center()
+          .addTo();
+        S.update();
+
+        try {
+          state.posts = await fetchRedditPosts();
+          loader.removeFrom();
+
+          if (state.posts.length > 0) {
+            buildBubbles();
+            initDriftAnimation();
+          } else {
+            showErrorPane("No posts found");
+          }
+        } catch (error) {
+          loader.removeFrom();
+          showErrorPane(error.message);
+        }
+
+        S.update();
+      }
+
+      // ============================================
+      // UNDERWATER BACKGROUND
+      // ============================================
+      function buildUnderwaterBackground() {
+        // Load and display background image - full screen cover
+        const bg = new Pic("background.png").addTo().siz(W, H).pos(0, 0);
+
+        // Add subtle floating particles across full screen
+        for (let i = 0; i < 25; i++) {
+          const size = rand(2, 4);
+          new Circle(size, "#ffffff")
+            .pos(rand(0, W), rand(0, H))
+            .alp(rand(0.03, 0.1))
+            .addTo();
+        }
+      }
+
+      // ============================================
+      // MAIN INITIALIZATION
+      // ============================================
+      new Frame(
+        FIT,
+        CONFIG.FRAME_WIDTH,
+        CONFIG.FRAME_HEIGHT,
+        CONFIG.BG_DEEP,
+        CONFIG.BG_DEEP,
+        ready,
+        "background.png"
+      );
+
+      async function ready() {
+        // Build underwater scene first (background layer)
+        buildUnderwaterBackground();
+
+        // Title label (updates when subreddit changes)
+        state.titleLabel = new Label({
+          text: `Reddit Bubbles - r/${state.subreddit}`,
+          size: 28,
+          color: "#e0f2fe",
+          bold: true,
+          font: "Arial",
+        })
+          .pos(20, 15)
+          .addTo();
+
+        // Subreddit input
+        state.subredditLabel = new Label({
+          text: "r/",
+          size: 16,
+          color: "#e0f2fe",
+          font: "Arial",
+        })
+          .pos(20, 55)
+          .addTo();
+
+        state.subredditInput = new TextInput({
+          width: 120,
+          height: 28,
+          placeholder: "subreddit",
+          size: 14,
+          color: "#1e3a5f",
+          backgroundColor: "#e0f2fe",
+          borderColor: "#7dd3fc",
+          borderWidth: 2,
+          corner: 14,
+        })
+          .pos(42, 52)
+          .addTo();
+        const go = new Label({
+          text: "Go",
+          size: 20,
+          bold: true,
+        });
+        state.goBtn = new Button({
+          label: go,
+          width: 49,
+          height: 28,
+          backgroundColor: "#0ea5e9",
+          rollBackgroundColor: "#38bdf8",
+          color: white,
+          corner: 14,
+        })
+          .pos(170, 52)
+          .addTo();
+
+        state.goBtn.on("click", () => {
+          const newSub = state.subredditInput.text.trim();
+          if (newSub && newSub !== state.subreddit) {
+            state.subreddit = newSub;
+            state.titleLabel.text = `Reddit Bubbles - r/${state.subreddit}`;
+            handleReload();
+          }
+        });
+
+        buildTooltip();
+        buildSortingBins();
+
+        // Load saved sorted bubbles from localStorage
+        if (loadSortedBubbles()) {
+          state.bins.painPoints.count = state.sortedBubbles.painPoints.length;
+          state.bins.painPoints.countLabel.text = `${state.bins.painPoints.labelText} (${state.bins.painPoints.count})`;
+          state.bins.opportunities.count = state.sortedBubbles.opportunities.length;
+          state.bins.opportunities.countLabel.text = `${state.bins.opportunities.labelText} (${state.bins.opportunities.count})`;
+          state.bins.noise.count = state.sortedBubbles.noise.length;
+          state.bins.noise.countLabel.text = `${state.bins.noise.labelText} (${state.bins.noise.count})`;
+        }
+
+        const loader = new Label({
+          text: `Loading r/${state.subreddit} posts...`,
+          size: 22,
+          color: "#7dd3fc",
+          font: "Arial",
+        })
+          .center()
+          .addTo();
+        S.update();
+
+        try {
+          state.posts = await fetchRedditPosts();
+          loader.removeFrom();
+
+          if (state.posts.length === 0) {
+            showErrorPane("No posts available");
+            return;
+          }
+
+          buildBubbles();
+          initDriftAnimation();
+
+          state.tooltip.top();
+
+          // Auto-refresh data every 5 minutes (300 seconds)
+          interval(300, () => {
+            handleReload();
+          });
+        } catch (error) {
+          loader.removeFrom();
+          showErrorPane(error.message);
+        }
+
+        S.update();
+      }
+    </script>
+    <meta name="viewport" content="width=device-width, user-scalable=no" />
+  </head>
+  <body></body>
+</html>
