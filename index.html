@@ -326,17 +326,24 @@
         const tooltipWidth = 260;
         const tooltipHeight = 160;
 
-        let tooltipX = bubble.x + bubble.radius + 12;
-        let tooltipY = bubble.y - 80;
+        // Position tooltip below the bubble to avoid covering X button
+        let tooltipX = bubble.x - tooltipWidth / 2 + bubble.radius;
+        let tooltipY = bubble.y + bubble.radius * 2 + 10;
 
-        if (tooltipX + tooltipWidth > W) {
-          tooltipX = bubble.x - bubble.radius - tooltipWidth - 15;
+        // If tooltip goes off bottom, position it above the bubble
+        if (tooltipY + tooltipHeight > H - 20) {
+          tooltipY = bubble.y - tooltipHeight - 10;
         }
+        // Keep within horizontal bounds
+        if (tooltipX < 10) {
+          tooltipX = 10;
+        }
+        if (tooltipX + tooltipWidth > W - 10) {
+          tooltipX = W - tooltipWidth - 10;
+        }
+        // Keep within vertical bounds
         if (tooltipY < CONFIG.TOP_BAR_HEIGHT) {
           tooltipY = CONFIG.TOP_BAR_HEIGHT + 10;
-        }
-        if (tooltipY + tooltipHeight > H - CONFIG.BIN_HEIGHT) {
-          tooltipY = H - CONFIG.BIN_HEIGHT - tooltipHeight - 10;
         }
 
         state.tooltip.pos(tooltipX, tooltipY);
@@ -1011,7 +1018,7 @@
 
         // X button for removing from bucket (hidden by default)
         const xBtnSize = 24;
-        const xBtn = new Container(xBtnSize, xBtnSize);
+        const xBtn = new Container(xBtnSize, xBtnSize).addTo(bubble);
         new Circle(xBtnSize / 2, "#ef4444").center(xBtn);
         new Label({
           text: "×",
@@ -1020,7 +1027,7 @@
           bold: true,
           font: "Arial",
         }).center(xBtn);
-        xBtn.pos(bubbleSize - xBtnSize - 5, 5, LEFT, TOP, bubble);
+        xBtn.pos(bubbleSize - xBtnSize - 5, 5);
         xBtn.vis(false);
         xBtn.cursor = "pointer";
         bubble.xBtn = xBtn;
