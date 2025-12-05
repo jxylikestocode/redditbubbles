@@ -3,6 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <title>Reddit Bubbles - r/SAT Visualizer</title>
+    <link rel="icon" type="image/svg+xml" href="favicon.svg">
 
     <!-- zimjs.com - JavaScript Canvas Framework -->
     <script type="module">
@@ -57,6 +58,7 @@
           opportunities: [],
           noise: [],
         },
+        poppedBubbles: [], // IDs of popped/dismissed bubbles
         currentFlairFilter: "All",
         tickerFunction: null,
         tooltip: null,
@@ -65,6 +67,7 @@
         flairTabs: null,
         bubbleField: null,
         titleLabel: null,
+        restoreBtn: null,
       };
 
       // LocalStorage helpers for persisting sorted bubbles per subreddit
@@ -90,6 +93,37 @@
         } catch (e) {
           console.warn("Failed to load from localStorage:", e);
         }
+        return false;
+      }
+
+      // LocalStorage helpers for popped/dismissed bubbles
+      const POPPED_STORAGE_KEY = "redditBubbles_poppedData";
+
+      function savePoppedBubbles() {
+        try {
+          const allData = JSON.parse(
+            localStorage.getItem(POPPED_STORAGE_KEY) || "{}"
+          );
+          allData[state.subreddit] = state.poppedBubbles;
+          localStorage.setItem(POPPED_STORAGE_KEY, JSON.stringify(allData));
+        } catch (e) {
+          console.warn("Failed to save popped bubbles:", e);
+        }
+      }
+
+      function loadPoppedBubbles() {
+        try {
+          const allData = JSON.parse(
+            localStorage.getItem(POPPED_STORAGE_KEY) || "{}"
+          );
+          if (allData[state.subreddit]) {
+            state.poppedBubbles = allData[state.subreddit];
+            return true;
+          }
+        } catch (e) {
+          console.warn("Failed to load popped bubbles:", e);
+        }
+        state.poppedBubbles = [];
         return false;
       }
 
@@ -581,9 +615,12 @@
           ...state.sortedBubbles.noise.map((p) => p.id),
         ]);
 
+        // Get IDs of popped/dismissed posts
+        const poppedIds = new Set(state.poppedBubbles);
+
         state.posts.forEach((post) => {
-          // Skip posts that have already been sorted
-          if (sortedIds.has(post.id)) return;
+          // Skip posts that have already been sorted or popped
+          if (sortedIds.has(post.id) || poppedIds.has(post.id)) return;
 
           const bubble = createBubble(
             post,
@@ -719,6 +756,8 @@
       }
 
       function setupBubbleEvents(bubble, fieldTop, fieldBottom) {
+        bubble.lastClickTime = 0;
+
         bubble.on("mouseover", (e) => {
           bubble.top(); // Bring bubble to front on hover
           if (!bubble.isDragging) {
@@ -755,10 +794,29 @@
           // Reset all bin highlights
           resetBinHighlights();
 
-          if (!bubble.isDragging && bubble.postData.permalink) {
-            // It was a click, not a drag - open the Reddit post
-            const url = "https://www.reddit.com" + bubble.postData.permalink;
-            window.open(url, "_blank");
+          if (!bubble.isDragging) {
+            const now = Date.now();
+            const timeSinceLastClick = now - bubble.lastClickTime;
+
+            if (timeSinceLastClick < 350) {
+              // Double-click: pop animation then send to Noise bucket
+              if (state.bins.noise && !bubble.isSorted) {
+                popBubbleToNoise(bubble);
+              }
+              bubble.lastClickTime = 0;
+              return;
+            }
+
+            bubble.lastClickTime = now;
+
+            // Single click: open Reddit post (with slight delay to check for double-click)
+            setTimeout(() => {
+              if (bubble.lastClickTime === now && bubble.postData.permalink) {
+                const url =
+                  "https://www.reddit.com" + bubble.postData.permalink;
+                window.open(url, "_blank");
+              }
+            }, 350);
           } else if (!bubble.isSorted) {
             // It was a drag - check for bin drop
             checkBinDrop(bubble, fieldTop, fieldBottom);
@@ -1193,6 +1251,58 @@
         }
       }
 
+      function popBubbleToNoise(bubble) {
+        // Get bubble center position for particles
+        const centerX = bubble.x + bubble.radius;
+        const centerY = bubble.y + bubble.radius;
+        const bubbleColor = bubble.getChildAt(0)?.color || "#ffffff";
+
+        // Create burst particles
+        const particleCount = 8;
+        for (let i = 0; i < particleCount; i++) {
+          const angle = (i / particleCount) * Math.PI * 2;
+          const particle = new Circle(8, bubbleColor)
+            .pos(centerX, centerY)
+            .addTo();
+
+          const distance = 80 + rand(0, 40);
+          const targetX = centerX + Math.cos(angle) * distance;
+          const targetY = centerY + Math.sin(angle) * distance;
+
+          particle.animate(
+            {
+              x: targetX,
+              y: targetY,
+              scale: 0,
+              alpha: 0,
+            },
+            0.4,
+            "quadOut",
+            () => {
+              particle.removeFrom();
+            }
+          );
+        }
+
+        // Scale up animation then send to Noise
+        bubble.animate(
+          {
+            scale: 1.4,
+            alpha: 0,
+          },
+          0.2,
+          "quadOut",
+          () => {
+            // Reset scale/alpha before snapToBin removes it
+            bubble.sca(1);
+            bubble.alp(1);
+            snapToBin(bubble, state.bins.noise, "noise");
+          }
+        );
+
+        S.update();
+      }
+
       // ============================================
       // FLAIR FILTER
       // ============================================
@@ -1393,6 +1503,16 @@
           state.bins.noise.count = state.sortedBubbles.noise.length;
           state.bins.noise.countLabel.text = `${state.bins.noise.labelText} (${state.bins.noise.count})`;
         }
+
+        // Hint label for double-click
+        new Label({
+          text: "Double click to send to Noise",
+          size: 12,
+          color: white,
+          font: "Arial",
+        })
+          .pos(0, 25, CENTER, TOP)
+          .addTo();
 
         const loader = new Label({
           text: `Loading r/${state.subreddit} posts...`,
