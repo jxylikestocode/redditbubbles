@@ -131,12 +131,7 @@
       // UTILITY FUNCTIONS
       // ============================================
       function getRedditApiUrl() {
-        return (
-          "https://corsproxy.io/?" +
-          encodeURIComponent(
-            `https://www.reddit.com/r/${state.subreddit}/rising.json?limit=50`
-          )
-        );
+        return `https://corsproxy.io/?${encodeURIComponent(`https://www.reddit.com/r/${state.subreddit}/rising.json?limit=50`)}`;
       }
 
       function rand(min, max) {
@@ -222,6 +217,16 @@
             const upvoteRatio = post.upvote_ratio || 0.5;
             const heat = (score * upvoteRatio) / age;
 
+            // Get best available image
+            let imageUrl = null;
+            if (post.preview?.images?.[0]?.source?.url) {
+              imageUrl = post.preview.images[0].source.url.replace(/&amp;/g, "&");
+            } else if (post.url_overridden_by_dest && /\.(jpg|jpeg|png|gif|webp)$/i.test(post.url_overridden_by_dest)) {
+              imageUrl = post.url_overridden_by_dest;
+            } else if (post.thumbnail && post.thumbnail.startsWith("http")) {
+              imageUrl = post.thumbnail;
+            }
+
             return {
               id: post.id || `unknown-${Math.random()}`,
               title: post.title || "Untitled",
@@ -234,6 +239,8 @@
               author: post.author || "unknown",
               age: age,
               heat: heat,
+              selftext: post.selftext || "",
+              thumbnail: imageUrl,
             };
           });
       }
@@ -287,8 +294,8 @@
       // TOOLTIP
       // ============================================
       function buildTooltip() {
-        const tooltipWidth = 260;
-        const tooltipHeight = 160;
+        const tooltipWidth = 280;
+        const tooltipHeight = 220;
         const content = new Container(tooltipWidth, tooltipHeight);
 
         content.titleLabel = new Label({
@@ -302,33 +309,43 @@
           lineHeight: 16,
         }).pos(12, 10, LEFT, TOP, content);
 
+        content.contentLabel = new Label({
+          text: "",
+          size: 10,
+          color: "#94a3b8",
+          align: LEFT,
+          font: "Arial",
+          lineWidth: tooltipWidth - 24,
+          lineHeight: 14,
+        }).pos(12, 50, LEFT, TOP, content);
+
         content.scoreLabel = new Label({
           text: "",
           size: 10,
           color: "#7dd3fc",
           font: "Arial",
-        }).pos(12, 75, LEFT, TOP, content);
+        }).pos(12, 145, LEFT, TOP, content);
 
         content.commentsLabel = new Label({
           text: "",
           size: 10,
           color: "#7dd3fc",
           font: "Arial",
-        }).pos(12, 95, LEFT, TOP, content);
+        }).pos(12, 165, LEFT, TOP, content);
 
         content.flairLabel = new Label({
           text: "",
           size: 10,
           color: "#7dd3fc",
           font: "Arial",
-        }).pos(12, 115, LEFT, TOP, content);
+        }).pos(12, 185, LEFT, TOP, content);
 
         content.heatLabel = new Label({
           text: "",
           size: 10,
           color: "#fcd34d",
           font: "Arial",
-        }).pos(12, 135, LEFT, TOP, content);
+        }).pos(140, 145, LEFT, TOP, content);
 
         state.tooltip = new Container(tooltipWidth, tooltipHeight);
 
@@ -352,13 +369,37 @@
         const content = state.tooltip.getChildAt(2);
 
         content.titleLabel.text = post.title; // Show full title in tooltip
-        content.scoreLabel.text = `⬆ Score: ${post.score}`;
-        content.commentsLabel.text = `💬 Comments: ${post.numComments}`;
-        content.flairLabel.text = `🏷 Flair: ${post.flair || "None"}`;
-        content.heatLabel.text = `🔥 Heat: ${post.heat.toFixed(4)}`;
 
-        const tooltipWidth = 260;
-        const tooltipHeight = 160;
+        // Show post content (truncated) - hide if no content
+        let contentText = post.selftext || "";
+        if (contentText.length > 120) {
+          contentText = contentText.substring(0, 120) + "...";
+        }
+
+        // Adjust stats position based on whether content exists
+        let statsY = 145;
+        if (contentText) {
+          content.contentLabel.text = contentText;
+          content.contentLabel.vis(true);
+        } else {
+          content.contentLabel.text = "";
+          content.contentLabel.vis(false);
+          statsY = 50; // Move stats up when no content
+        }
+
+        content.scoreLabel.text = `⬆ ${post.score}`;
+        content.commentsLabel.text = `💬 ${post.numComments}`;
+        content.flairLabel.text = `🏷 ${post.flair || "None"}`;
+        content.heatLabel.text = `🔥 ${post.heat.toFixed(2)}`;
+
+        // Reposition stats labels
+        content.scoreLabel.pos(12, statsY);
+        content.commentsLabel.pos(12, statsY + 20);
+        content.flairLabel.pos(12, statsY + 40);
+        content.heatLabel.pos(140, statsY);
+
+        const tooltipWidth = 280;
+        const tooltipHeight = 220;
 
         // Position tooltip below the bubble to avoid covering X button
         let tooltipX = bubble.x - tooltipWidth / 2 + bubble.radius;
@@ -383,10 +424,39 @@
         state.tooltip.pos(tooltipX, tooltipY);
         state.tooltip.top(); // Always keep tooltip on top
         state.tooltip.alpha = 1;
+
+        // Show HTML image overlay if thumbnail exists
+        const imgEl = document.getElementById("tooltip-image");
+        if (post.thumbnail) {
+          // Convert ZIM stage coordinates to screen coordinates
+          const canvas = document.querySelector("canvas");
+          const rect = canvas.getBoundingClientRect();
+          const scaleX = rect.width / W;
+          const scaleY = rect.height / H;
+
+          const imgY = contentText ? 130 : 50; // Move image up when no content
+          const screenX = rect.left + (tooltipX + tooltipWidth - 90) * scaleX;
+          const screenY = rect.top + (tooltipY + imgY) * scaleY;
+          const imgSize = 80 * Math.min(scaleX, scaleY);
+
+          imgEl.src = post.thumbnail;
+          imgEl.style.display = "block";
+          imgEl.style.left = screenX + "px";
+          imgEl.style.top = screenY + "px";
+          imgEl.style.width = imgSize + "px";
+          imgEl.style.height = imgSize + "px";
+        } else {
+          imgEl.style.display = "none";
+        }
+
         S.update();
       }
 
       function hideTooltip() {
+        // Hide HTML image overlay
+        const imgEl = document.getElementById("tooltip-image");
+        imgEl.style.display = "none";
+
         if (state.tooltip) {
           state.tooltip.alpha = 0;
           S.update();
@@ -1551,6 +1621,21 @@
       }
     </script>
     <meta name="viewport" content="width=device-width, user-scalable=no" />
+    <style>
+      #tooltip-image {
+        position: fixed;
+        width: 80px;
+        height: 80px;
+        object-fit: cover;
+        border-radius: 8px;
+        pointer-events: none;
+        display: none;
+        z-index: 9999;
+        border: 1px solid rgba(56, 189, 248, 0.4);
+      }
+    </style>
   </head>
-  <body></body>
+  <body>
+    <img id="tooltip-image" src="" alt="">
+  </body>
 </html>
